@@ -26,15 +26,21 @@ from openjarvis.core.types import Conversation, Message, Role
 from openjarvis.memory.store import TRUST_TRUSTED, LocalFactStore
 from openjarvis.my_jarvis.audit import audit_local_repo, audit_website_posture
 from openjarvis.my_jarvis.brains import BrainRouter, detect_brain_switch_intent
+from openjarvis.my_jarvis.briefing import MorningBriefingService
+from openjarvis.my_jarvis.channels_bridge import JarvisChannelManager
 from openjarvis.my_jarvis.hardware import (
     inspect_hardware,
     recommend_models_for_hardware,
     search_huggingface_gguf,
 )
+from openjarvis.my_jarvis.mcp_hub import JarvisMCPHub
+from openjarvis.my_jarvis.speech_hub import JarvisSpeechHub
 from openjarvis.my_jarvis.tools import (
     HardwareAdvisorTool,
     HuggingFaceModelSearchTool,
     JarvisMemoryTool,
+    MCPHubStatusTool,
+    MorningBriefingTool,
     RepoSecurityAuditTool,
     SiteSecurityAuditTool,
     SwitchBrainTool,
@@ -49,7 +55,8 @@ DEFAULT_JARVIS_PERSONA = (
     "Be sharp, concise, technically accurate, and quietly witty like an aerospace copilot. "
     "Answer directly without unnecessary filler. When helpful, use your registered OpenJarvis tools "
     "(calculator, hardware_advisor, hf_model_search, site_security_audit, repo_security_audit, "
-    "jarvis_memory, switch_brain). Keep spoken-friendly replies clear and structured."
+    "jarvis_memory, switch_brain, morning_briefing, mcp_hub, and any connected MCP tools). "
+    "Keep spoken-friendly replies clear and structured."
 )
 
 _REMEMBER_PATTERN = re.compile(
@@ -88,6 +95,8 @@ class MyJarvisRuntime:
         fact_store: Optional[LocalFactStore] = None,
         session_path: Optional[Path] = None,
         persona: str = DEFAULT_JARVIS_PERSONA,
+        briefing_config_path: Optional[Path] = None,
+        mcp_config_path: Optional[Path] = None,
     ) -> None:
         self.router = router or BrainRouter()
         self.fact_store = fact_store or LocalFactStore()
@@ -96,8 +105,23 @@ class MyJarvisRuntime:
         self._session_path = session_path or (
             get_config_dir() / "my_jarvis_history.json"
         )
+        self.briefing_service = MorningBriefingService(
+            fact_store=self.fact_store,
+            config_path=briefing_config_path,
+        )
+        self.mcp_hub = JarvisMCPHub(config_path=mcp_config_path)
+        self.speech_hub = JarvisSpeechHub()
+        self.channel_manager = JarvisChannelManager(
+            chat_callback=self.chat,
+            bus=self.bus,
+        )
         self._history: List[TurnRecord] = []
         self._load_history()
+
+    def shutdown(self) -> None:
+        """Cleanly close active MCP transports and messaging channel listeners."""
+        self.channel_manager.disconnect_all()
+        self.mcp_hub.close_all()
 
     # -- Persistence --------------------------------------------------------
 
@@ -193,7 +217,7 @@ class MyJarvisRuntime:
         return "\n\n".join(parts)
 
     def _build_tools(self) -> List[BaseTool]:
-        return [
+        base_tools: List[BaseTool] = [
             CalculatorTool(),
             HardwareAdvisorTool(),
             HuggingFaceModelSearchTool(),
@@ -201,7 +225,12 @@ class MyJarvisRuntime:
             RepoSecurityAuditTool(),
             JarvisMemoryTool(self.fact_store),
             SwitchBrainTool(self.router),
+            MorningBriefingTool(self.briefing_service),
+            MCPHubStatusTool(self.mcp_hub),
         ]
+        # Automatically expose every tool discovered from connected MCP servers.
+        base_tools.extend(self.mcp_hub.get_active_tools())
+        return base_tools
 
     # -- Deterministic tool fast-path (works offline & gives snappy replies) -
 
@@ -266,8 +295,30 @@ class MyJarvisRuntime:
                     None,
                 )
 
-        # 3. Slash shortcuts
+        # 3. Slash & voice shortcuts
         low = stripped.lower()
+        if low in (
+            "/briefing",
+            "morning briefing",
+            "daily briefing",
+            "give me my morning briefing",
+            "hey jarvis give me my morning briefing",
+            "jarvis morning briefing",
+        ):
+            rep = self.briefing_service.generate()
+            return (
+                rep.markdown,
+                [
+                    {
+                        "tool": "morning_briefing",
+                        "city": rep.city,
+                        "events": len(rep.calendar_events),
+                        "news": len(rep.news),
+                    }
+                ],
+                None,
+            )
+
         if low in (
             "/brains",
             "list brains",
@@ -706,6 +757,38 @@ class MyJarvisRuntime:
                     f"{f'{hw.total_vram_gb:.1f} GB VRAM ({hw.accelerator})' if hw.total_vram_gb > 0 else 'CPU mode'}"
                 ),
                 "fix": "",
+            },
+            {
+                "name": "MCP Server Hub",
+                "status": "ok",
+                "detail": (
+                    f"{len(self.mcp_hub.list_servers()['servers'])} servers configured · "
+                    f"{self.mcp_hub.list_servers()['total_mcp_tools']} active tools"
+                ),
+                "fix": "",
+            },
+            {
+                "name": "Messaging Channels",
+                "status": "ok",
+                "detail": (
+                    f"{sum(1 for c in self.channel_manager.list_channels() if c['status'] == 'connected')} "
+                    "connected (Webhook always active)"
+                ),
+                "fix": "",
+            },
+            {
+                "name": "Neural Voice Engines",
+                "status": "ok"
+                if self.speech_hub.status()["neural_tts_ready"]
+                else "warn",
+                "detail": (
+                    "Neural TTS ready"
+                    if self.speech_hub.status()["neural_tts_ready"]
+                    else "Using Browser Web Speech API (optional neural TTS not configured yet)"
+                ),
+                "fix": ""
+                if self.speech_hub.status()["neural_tts_ready"]
+                else "Optional: `uv sync --extra voice` (Kokoro local TTS) or add OPENAI_API_KEY / ELEVENLABS_API_KEY.",
             },
         ]
         return {

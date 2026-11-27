@@ -2,8 +2,10 @@
 
 Wraps Stanford OpenJarvis's ``create_app()`` so every native OpenJarvis endpoint
 (``/v1/chat/completions``, ``/v1/models``, ``/v1/agents``, ``/health``) remains
-available alongside ``/api/jarvis/*`` multi-brain, voice, memory, hardware,
-and defensive self-audit routes.
+available alongside ``/api/jarvis/*`` routes for multi-brain hot-swapping,
+morning briefings, messaging channels (Telegram/Discord/Slack/Webhook), neural
+speech (Kokoro/OpenAI/ElevenLabs/Whisper), MCP servers, memory, hardware, and
+defensive self-auditing.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -79,6 +81,51 @@ class PersonaUpdateRequest(BaseModel):
     persona: str = Field(..., min_length=10, max_length=4000)
 
 
+class BriefingConfigRequest(BaseModel):
+    city: Optional[str] = None
+    include_calendar: Optional[bool] = None
+    include_drive: Optional[bool] = None
+    include_weather: Optional[bool] = None
+    include_news: Optional[bool] = None
+    schedule_cron: Optional[str] = None
+
+
+class ChannelConfigRequest(BaseModel):
+    channel: str = Field(..., min_length=1, max_length=40)
+    token: str = ""
+    extra: str = ""
+
+
+class WebhookInboundRequest(BaseModel):
+    sender: str = "webhook-user"
+    content: str = Field(..., min_length=1, max_length=8000)
+    channel_name: str = "webhook"
+    secret: str = ""
+
+
+class SpeechKeyRequest(BaseModel):
+    provider: str = Field(..., min_length=1, max_length=40)
+    api_key: str = ""
+
+
+class SpeechSynthesizeRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+    backend: str = "auto"
+    voice_id: str = ""
+    speed: float = 1.0
+
+
+class MCPServerAddRequest(BaseModel):
+    server_id: str = Field(..., min_length=1, max_length=80)
+    name: str = Field(..., min_length=1, max_length=120)
+    transport: str = Field(..., min_length=1, max_length=20)
+    url: str = ""
+    token: str = ""
+    command: str = ""
+    args: List[str] = Field(default_factory=list)
+    description: str = ""
+
+
 # ---------------------------------------------------------------------------
 # App Factory
 # ---------------------------------------------------------------------------
@@ -121,12 +168,20 @@ def create_my_jarvis_app(
     app.title = "My-JARVIS (Built on Stanford OpenJarvis)"
     app.state.my_jarvis = rt
 
+    @app.on_event("shutdown")
+    async def _shutdown_my_jarvis() -> None:
+        rt.shutdown()
+
     api = APIRouter(prefix="/api/jarvis", tags=["my-jarvis"])
+
+    # -- Core Status, Persona & Chat ----------------------------------------
 
     @api.get("/status")
     async def get_status() -> Dict[str, Any]:
         import openjarvis
 
+        speech_st = rt.speech_hub.status()
+        mcp_st = rt.mcp_hub.list_servers()
         return {
             "ok": True,
             "openjarvis_version": openjarvis.__version__,
@@ -134,6 +189,8 @@ def create_my_jarvis_app(
             "active_brain_ready": rt.router.is_brain_configured(rt.router.active_brain),
             "memory_count": len(rt.list_memories()),
             "history_count": len(rt.get_history()),
+            "mcp_tool_count": mcp_st["total_mcp_tools"],
+            "neural_tts_ready": speech_st["neural_tts_ready"],
             "persona": rt.persona,
         }
 
@@ -180,6 +237,8 @@ def create_my_jarvis_app(
                     "brain_switched": False,
                 },
             )
+
+    # -- Brains & Providers -------------------------------------------------
 
     @api.get("/brains")
     async def list_brains() -> Dict[str, Any]:
@@ -228,6 +287,8 @@ def create_my_jarvis_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    # -- Memory Vault -------------------------------------------------------
+
     @api.get("/memory")
     async def get_memory() -> Dict[str, Any]:
         mems = rt.list_memories()
@@ -250,6 +311,161 @@ def create_my_jarvis_app(
                 status_code=404, detail=res.get("error", "Memory not found")
             )
         return res
+
+    # -- Morning Briefing ---------------------------------------------------
+
+    @api.get("/briefing")
+    async def get_briefing(
+        city: Optional[str] = Query(default=None),
+        network: bool = Query(default=True),
+    ) -> Dict[str, Any]:
+        report = rt.briefing_service.generate(city=city, include_network=network)
+        return {
+            "config": rt.briefing_service.config.to_dict(),
+            "briefing": report.to_dict(),
+        }
+
+    @api.post("/briefing/config")
+    async def update_briefing_config(req: BriefingConfigRequest) -> Dict[str, Any]:
+        cfg = rt.briefing_service.save_config(**req.model_dump(exclude_none=True))
+        return {"ok": True, "config": cfg.to_dict()}
+
+    # -- Messaging Channels (Telegram / Discord / Slack / Webhook) ----------
+
+    @api.get("/channels")
+    async def get_channels() -> Dict[str, Any]:
+        return {
+            "channels": rt.channel_manager.list_channels(),
+            "activity": rt.channel_manager.get_activity(),
+        }
+
+    @api.post("/channels/configure")
+    async def configure_channel(req: ChannelConfigRequest) -> Dict[str, Any]:
+        try:
+            return rt.channel_manager.configure_channel(
+                req.channel,
+                token=req.token,
+                extra=req.extra,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @api.post("/channels/{channel_id}/connect")
+    async def connect_channel(channel_id: str) -> Dict[str, Any]:
+        try:
+            return rt.channel_manager.connect(channel_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @api.post("/channels/{channel_id}/disconnect")
+    async def disconnect_channel(channel_id: str) -> Dict[str, Any]:
+        return rt.channel_manager.disconnect(channel_id)
+
+    @api.post("/channels/webhook/inbound")
+    async def webhook_inbound(req: WebhookInboundRequest) -> Dict[str, Any]:
+        res = rt.channel_manager.handle_webhook_inbound(
+            sender=req.sender,
+            content=req.content,
+            channel_name=req.channel_name,
+            secret=req.secret,
+        )
+        if not res.get("ok"):
+            raise HTTPException(
+                status_code=int(res.get("status_code", 400)),
+                detail=res.get("error", "Webhook rejected"),
+            )
+        _sync_openjarvis_state(app, rt)
+        return res
+
+    # -- Neural Speech (Kokoro / OpenAI / ElevenLabs / Faster-Whisper) ------
+
+    @api.get("/speech/status")
+    async def get_speech_status() -> Dict[str, Any]:
+        return rt.speech_hub.status()
+
+    @api.post("/speech/keys")
+    async def configure_speech_key(req: SpeechKeyRequest) -> Dict[str, Any]:
+        try:
+            return rt.speech_hub.configure_key(req.provider, req.api_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @api.post("/speech/synthesize")
+    async def synthesize_speech(req: SpeechSynthesizeRequest) -> Response:
+        res = rt.speech_hub.synthesize(
+            req.text,
+            backend=req.backend,
+            voice_id=req.voice_id,
+            speed=req.speed,
+        )
+        if res is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "No neural TTS backend is ready. Install Kokoro (`uv sync --extra voice`) "
+                    "or configure OPENAI_API_KEY / ELEVENLABS_API_KEY."
+                ),
+            )
+        return Response(
+            content=res["audio"],
+            media_type=res["media_type"],
+            headers={
+                "X-Jarvis-TTS-Backend": str(res["backend"]),
+                "X-Jarvis-TTS-Voice": str(res["voice_id"]),
+            },
+        )
+
+    @api.post("/speech/transcribe")
+    async def transcribe_speech(file: UploadFile = File(...)) -> Dict[str, Any]:
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Empty audio upload.")
+        res = rt.speech_hub.transcribe(raw, filename=file.filename or "audio.webm")
+        if not res.get("ok"):
+            raise HTTPException(
+                status_code=503, detail=res.get("error", "STT unavailable")
+            )
+        return res
+
+    # -- MCP Server Hub -----------------------------------------------------
+
+    @api.get("/mcp")
+    async def get_mcp_servers() -> Dict[str, Any]:
+        return rt.mcp_hub.list_servers()
+
+    @api.post("/mcp/servers")
+    async def add_mcp_server(req: MCPServerAddRequest) -> Dict[str, Any]:
+        try:
+            spec = rt.mcp_hub.add_server(
+                server_id=req.server_id,
+                name=req.name,
+                transport=req.transport,
+                url=req.url,
+                token=req.token,
+                command=req.command,
+                args=req.args,
+                description=req.description,
+            )
+            return {"ok": True, "server": spec.to_public_dict()}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @api.delete("/mcp/servers/{server_id}")
+    async def remove_mcp_server(server_id: str) -> Dict[str, Any]:
+        return rt.mcp_hub.remove_server(server_id)
+
+    @api.post("/mcp/servers/{server_id}/connect")
+    async def connect_mcp_server(server_id: str) -> Dict[str, Any]:
+        try:
+            return rt.mcp_hub.connect(server_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @api.post("/mcp/servers/{server_id}/disconnect")
+    async def disconnect_mcp_server(server_id: str) -> Dict[str, Any]:
+        return rt.mcp_hub.disconnect(server_id)
+
+    # -- Hardware, Hugging Face, Defensive Audits & Doctor ------------------
 
     @api.get("/hardware")
     async def get_hardware() -> Dict[str, Any]:

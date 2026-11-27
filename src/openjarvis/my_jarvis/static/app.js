@@ -201,6 +201,8 @@
   const VIEW_TITLES = {
     command: ['Command Center', 'Voice, Tools & Hot-Swappable Multi-Brain Core'],
     brains: ['Brains & Provider Keys', 'Local Ollama · Venice AI · Anthropic · DeepSeek · OpenAI · Gemini'],
+    briefing: ['Executive Morning Briefing', 'Calendar · Drive · Weather · Tech News · Memory'],
+    integrations: ['Channels, MCP & Neural Voice', 'Telegram · Discord · Slack · MCP Servers · Kokoro / Whisper'],
     memory: ['Persistent Memory Vault', 'Shared across all brains via OpenJarvis LocalFactStore'],
     hardware: ['Hardware & Hugging Face', 'Live VRAM/RAM fit scoring & GGUF explorer'],
     audit: ['Defensive Self-Audit', 'Authorized passive header/TLS check & local repo scan'],
@@ -222,6 +224,8 @@
     $('topbar-meta').textContent = meta;
 
     if (view === 'brains') loadBrains();
+    if (view === 'briefing') loadBriefing();
+    if (view === 'integrations') loadIntegrations();
     if (view === 'memory') loadMemories();
     if (view === 'hardware') { loadHardware(); searchHF(); }
     if (view === 'doctor') loadDoctor();
@@ -387,17 +391,57 @@
     window.speechSynthesis.onvoiceschanged = populate;
   }
 
-  function speakText(markdownText) {
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
+  let activeAudioEl = null;
+
+  async function speakText(markdownText) {
     // Strip markdown formatting for natural speech
-    const plain = markdownText
+    const plain = String(markdownText || '')
       .replace(/```[\s\S]*?```/g, ' Code block omitted. ')
       .replace(/[*#`_~]/g, '')
       .replace(/https?:\/\/\S+/g, 'link')
-      .slice(0, 700);
+      .slice(0, 800)
+      .trim();
+    if (!plain) return;
+
+    if (activeAudioEl) {
+      try { activeAudioEl.pause(); } catch (_) {}
+      activeAudioEl = null;
+    }
+    window.speechSynthesis?.cancel();
+
+    // Try OpenJarvis backend Neural TTS (Kokoro / OpenAI / ElevenLabs / Cartesia) if ready
+    if (state.neuralTtsReady) {
+      try {
+        const resp = await fetch('/api/jarvis/speech/synthesize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: plain, backend: 'auto' }),
+        });
+        if (resp.ok) {
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          activeAudioEl = audio;
+          audio.onplay = () => {
+            setCoreMode('speaking');
+            $('btn-stop-tts').classList.remove('hidden');
+          };
+          audio.onended = audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            activeAudioEl = null;
+            setCoreMode('standby');
+            $('btn-stop-tts').classList.add('hidden');
+          };
+          await audio.play();
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // Zero-dependency browser Web Speech API fallback
+    if (!('speechSynthesis' in window)) return;
     const utt = new SpeechSynthesisUtterance(plain);
-    const chosen = $('tts-voice-select').value;
+    const chosen = $('tts-voice-select')?.value;
     if (chosen) {
       const voice = window.speechSynthesis.getVoices().find((v) => v.name === chosen);
       if (voice) utt.voice = voice;
@@ -805,9 +849,257 @@
     }
   }
 
+  // --- Morning Briefing View ---
+  let lastBriefingScript = '';
+
+  async function loadBriefing() {
+    const grid = $('briefing-grid');
+    const meta = $('briefing-meta');
+    if (!grid) return;
+    grid.innerHTML = '<div class="briefing-card"><h3>Loading</h3><p class="memory-meta">Gathering Calendar, Drive, Weather, Headlines, and Memory...</p></div>';
+    try {
+      const city = ($('briefing-city')?.value || '').trim();
+      const qs = city ? `?city=${encodeURIComponent(city)}` : '';
+      const data = await api(`/api/jarvis/briefing${qs}`);
+      const b = data.briefing;
+      lastBriefingScript = b.spoken_script || '';
+      if (data.config?.city && $('briefing-city') && !city) {
+        $('briefing-city').value = data.config.city;
+      }
+      meta.textContent = `${b.greeting} · Generated ${b.generated_at} · City: ${b.city}`;
+
+      const weatherBody = b.weather?.available
+        ? `<div><strong>${escapeHtml(b.weather.temp_f)}°F</strong> · ${escapeHtml(b.weather.condition)}</div><div class="memory-meta">Feels like ${escapeHtml(b.weather.feels_like_f)}°F · Humidity ${escapeHtml(b.weather.humidity)}% (${escapeHtml(b.weather.source)})</div>`
+        : `<div class="memory-meta">${escapeHtml(b.weather?.note || 'Weather unavailable')}</div>`;
+
+      const calBody = b.calendar_events?.length
+        ? `<ul class="briefing-list">${b.calendar_events.map((e) => `<li><code>${escapeHtml(e.start)}</code> — ${escapeHtml(e.summary)}</li>`).join('')}</ul>`
+        : `<div class="memory-meta">No calendar events (${escapeHtml(b.calendar_source)}).</div>`;
+
+      const driveBody = b.drive_files?.length
+        ? `<ul class="briefing-list">${b.drive_files.map((f) => `<li>${escapeHtml(f.name)}</li>`).join('')}</ul>`
+        : `<div class="memory-meta">No recent Drive files (${escapeHtml(b.drive_source)}).</div>`;
+
+      const newsBody = b.news?.length
+        ? `<ul class="briefing-list">${b.news.map((n) => `<li><a href="${escapeHtml(n.url)}" target="_blank" rel="noopener">${escapeHtml(n.title)}</a> <span class="memory-meta">(${n.score} pts)</span></li>`).join('')}</ul>`
+        : '<div class="memory-meta">No live headlines reachable in current network environment.</div>';
+
+      const memBody = b.memories?.length
+        ? `<ul class="briefing-list">${b.memories.map((m) => `<li>${escapeHtml(m)}</li>`).join('')}</ul>`
+        : '<div class="memory-meta">No saved facts yet. Add facts in Memory Vault or chat.</div>';
+
+      grid.innerHTML = `
+        <div class="briefing-card"><h3>Weather · ${escapeHtml(b.city)}</h3>${weatherBody}</div>
+        <div class="briefing-card"><h3>Today's Schedule (${escapeHtml(b.calendar_source)})</h3>${calBody}</div>
+        <div class="briefing-card"><h3>Recent Google Drive (${escapeHtml(b.drive_source)})</h3>${driveBody}</div>
+        <div class="briefing-card"><h3>Tech &amp; AI Headlines</h3>${newsBody}</div>
+        <div class="briefing-card"><h3>Active Personal Context</h3>${memBody}</div>
+      `;
+    } catch (err) {
+      grid.innerHTML = `<div class="briefing-card"><h3>Error</h3><div class="memory-meta">${escapeHtml(err.message)}</div></div>`;
+    }
+  }
+
+  // --- Channels, MCP & Neural Speech View ---
+  async function loadIntegrations() {
+    await Promise.all([loadChannels(), loadMCP(), loadSpeech()]);
+  }
+
+  async function loadChannels() {
+    const list = $('channels-list');
+    const log = $('channel-activity-log');
+    if (!list) return;
+    try {
+      const data = await api('/api/jarvis/channels');
+      list.innerHTML = (data.channels || []).map((ch) => {
+        const isConn = ch.status === 'connected';
+        return `
+          <div class="provider-row">
+            <div class="provider-row-head">
+              <span class="provider-name">${escapeHtml(ch.label)}</span>
+              <span class="provider-status ${isConn ? 'ok' : 'missing'}">${escapeHtml(ch.status)}</span>
+            </div>
+            <div class="memory-meta">${escapeHtml(ch.install_hint)}</div>
+            <form class="provider-form channel-cfg-form" data-ch="${escapeHtml(ch.id)}">
+              <input type="password" name="token" placeholder="${ch.masked_token ? `Saved (${ch.masked_token}) — paste to update` : `Paste ${ch.token_env}`}" />
+              ${ch.extra_env ? `<input type="text" name="extra" placeholder="${escapeHtml(ch.extra_label || ch.extra_env)}" />` : ''}
+              <button type="submit" class="btn-secondary">Save</button>
+            </form>
+            ${ch.id !== 'webhook' ? `
+              <div class="channel-actions">
+                <button class="btn-ghost-sm" data-ch-connect="${escapeHtml(ch.id)}">Connect</button>
+                <button class="btn-ghost-sm" data-ch-disconnect="${escapeHtml(ch.id)}">Disconnect</button>
+              </div>
+            ` : '<div class="memory-meta">Endpoint: <code>POST /api/jarvis/channels/webhook/inbound</code></div>'}
+          </div>
+        `;
+      }).join('');
+
+      list.querySelectorAll('.channel-cfg-form').forEach((form) => {
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const ch = form.dataset.ch;
+          const token = form.querySelector('input[name="token"]')?.value || '';
+          const extra = form.querySelector('input[name="extra"]')?.value || '';
+          await api('/api/jarvis/channels/configure', {
+            method: 'POST',
+            body: JSON.stringify({ channel: ch, token, extra }),
+          });
+          toast(`Saved ${ch} credentials`);
+          loadChannels();
+        });
+      });
+
+      list.querySelectorAll('[data-ch-connect]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const res = await api(`/api/jarvis/channels/${btn.dataset.chConnect}/connect`, { method: 'POST' });
+          toast(res.ok ? `Connected ${btn.dataset.chConnect}` : (res.error || 'Could not connect'));
+          loadChannels();
+        });
+      });
+
+      list.querySelectorAll('[data-ch-disconnect]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          await api(`/api/jarvis/channels/${btn.dataset.chDisconnect}/disconnect`, { method: 'POST' });
+          toast(`Disconnected ${btn.dataset.chDisconnect}`);
+          loadChannels();
+        });
+      });
+
+      const acts = data.activity || [];
+      log.innerHTML = acts.length
+        ? acts.map((a) => `
+            <div class="finding-row">
+              <div><span class="fit-badge info">${escapeHtml(a.channel)}</span> <strong>${escapeHtml(a.sender)}</strong>: ${escapeHtml(a.inbound)}</div>
+              <div class="memory-meta">→ (${escapeHtml(a.brain_id)}) ${escapeHtml(a.reply_preview)}</div>
+            </div>
+          `).join('')
+        : '<div class="memory-meta">No inbound channel messages yet. Use "Simulate Webhook" above to verify live channel routing.</div>';
+    } catch (err) {
+      list.innerHTML = `<div class="provider-row">Channels error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function loadMCP() {
+    const chips = $('mcp-template-chips');
+    const list = $('mcp-server-list');
+    if (!list) return;
+    try {
+      const data = await api('/api/jarvis/mcp');
+      chips.innerHTML = (data.templates || []).map((t) => `
+        <button class="btn-ghost-sm" data-mcp-tpl="${escapeHtml(t.id)}" title="${escapeHtml(t.description)}">
+          + ${escapeHtml(t.name)}
+        </button>
+      `).join('');
+
+      chips.querySelectorAll('[data-mcp-tpl]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const tpl = (data.templates || []).find((t) => t.id === btn.dataset.mcpTpl);
+          if (!tpl) return;
+          $('mcp-id').value = tpl.id;
+          $('mcp-name').value = tpl.name;
+          $('mcp-transport').value = tpl.transport;
+          $('mcp-command').value = tpl.command || '';
+          $('mcp-args').value = (tpl.args || []).join(' ');
+          $('mcp-url').value = tpl.url || '';
+          toast(`Prefilled ${tpl.name} — click Register MCP Server`);
+        });
+      });
+
+      const servers = data.servers || [];
+      list.innerHTML = servers.length
+        ? servers.map((s) => `
+            <div class="doctor-row">
+              <div>
+                <div><strong>${escapeHtml(s.name)}</strong> <span class="hw-sub">(${escapeHtml(s.transport)} · ${escapeHtml(s.url || [s.command, ...(s.args || [])].join(' '))})</span></div>
+                ${s.tools?.length ? `<div class="tool-trace-row" style="margin-top:6px;">${s.tools.map((t) => `<span class="tool-pill">⚙ ${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
+                ${s.error ? `<div class="memory-meta" style="color:#f43f5e;">${escapeHtml(s.error)}</div>` : ''}
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                <span class="fit-badge ${s.connected ? 'ok' : 'warn'}">${s.connected ? `${s.tool_count} tools` : 'offline'}</span>
+                <button class="btn-ghost-sm" data-mcp-conn="${escapeHtml(s.id)}">${s.connected ? 'Reconnect' : 'Connect'}</button>
+                <button class="btn-ghost-sm" data-mcp-del="${escapeHtml(s.id)}">Remove</button>
+              </div>
+            </div>
+          `).join('')
+        : '<div class="doctor-row"><span class="memory-meta">No MCP servers registered yet. Pick a starter template above or enter your own Stdio/HTTP server.</span></div>';
+
+      list.querySelectorAll('[data-mcp-conn]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const res = await api(`/api/jarvis/mcp/servers/${btn.dataset.mcpConn}/connect`, { method: 'POST' });
+          toast(res.ok ? `Connected (${res.tools.length} tools discovered)` : `Failed: ${res.error}`);
+          loadMCP();
+        });
+      });
+      list.querySelectorAll('[data-mcp-del]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          await api(`/api/jarvis/mcp/servers/${btn.dataset.mcpDel}`, { method: 'DELETE' });
+          toast('MCP server removed');
+          loadMCP();
+        });
+      });
+    } catch (err) {
+      list.innerHTML = `<div class="doctor-row">MCP error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function loadSpeech() {
+    const list = $('speech-backends-list');
+    const keysBox = $('speech-keys-list');
+    if (!list) return;
+    try {
+      const data = await api('/api/jarvis/speech/status');
+      state.neuralTtsReady = Boolean(data.neural_tts_ready);
+      const rows = [
+        ...(data.tts_backends || []).map((b) => ({ ...b, kind: 'TTS' })),
+        ...(data.stt_backends || []).map((b) => ({ ...b, kind: 'STT' })),
+      ];
+      list.innerHTML = rows.map((r) => `
+        <div class="doctor-row">
+          <div>
+            <div><span class="fit-badge info">${r.kind}</span> <strong>${escapeHtml(r.label)}</strong></div>
+            <div class="memory-meta">${escapeHtml(r.install_hint)}</div>
+          </div>
+          <span class="fit-badge ${r.ready ? 'ok' : 'warn'}">${r.ready ? 'ready' : 'setup'}</span>
+        </div>
+      `).join('');
+
+      const keyProviders = [
+        { id: 'elevenlabs', label: 'ElevenLabs TTS API Key', env: 'ELEVENLABS_API_KEY' },
+        { id: 'cartesia', label: 'Cartesia TTS API Key', env: 'CARTESIA_API_KEY' },
+        { id: 'deepgram', label: 'Deepgram STT API Key', env: 'DEEPGRAM_API_KEY' },
+      ];
+      keysBox.innerHTML = keyProviders.map((kp) => `
+        <div class="provider-row">
+          <div class="provider-row-head"><span class="provider-name">${escapeHtml(kp.label)}</span></div>
+          <form class="provider-form speech-key-form" data-sp="${kp.id}">
+            <input type="password" name="key" placeholder="Paste ${kp.env}" />
+            <button type="submit" class="btn-secondary">Save</button>
+          </form>
+        </div>
+      `).join('');
+
+      keysBox.querySelectorAll('.speech-key-form').forEach((form) => {
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const key = form.querySelector('input[name="key"]').value.trim();
+          await api('/api/jarvis/speech/keys', {
+            method: 'POST',
+            body: JSON.stringify({ provider: form.dataset.sp, api_key: key }),
+          });
+          toast(`Saved ${form.dataset.sp} speech key`);
+          loadSpeech();
+        });
+      });
+    } catch (err) {
+      list.innerHTML = `<div class="doctor-row">Speech status error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
   async function loadStatusQuiet() {
     try {
       const st = await api('/api/jarvis/status');
+      state.neuralTtsReady = Boolean(st.neural_tts_ready);
       $('nav-memory-count').textContent = String(st.memory_count || 0);
       updateActiveBrainUI(st.active_brain, st.active_brain_ready);
     } catch (_) {}
@@ -879,6 +1171,10 @@
       }
     });
     $('btn-stop-tts').addEventListener('click', () => {
+      if (activeAudioEl) {
+        try { activeAudioEl.pause(); } catch (_) {}
+        activeAudioEl = null;
+      }
       window.speechSynthesis?.cancel();
       setCoreMode('standby');
       $('btn-stop-tts').classList.add('hidden');
@@ -905,6 +1201,68 @@
       } catch (err) {
         toast(`Could not add brain: ${err.message}`);
       }
+    });
+
+    // Briefing
+    $('btn-run-briefing')?.addEventListener('click', async () => {
+      const city = $('briefing-city').value.trim();
+      if (city) {
+        await api('/api/jarvis/briefing/config', {
+          method: 'POST',
+          body: JSON.stringify({ city }),
+        });
+      }
+      loadBriefing();
+    });
+    $('btn-speak-briefing')?.addEventListener('click', () => {
+      if (lastBriefingScript) speakText(lastBriefingScript);
+      else toast('Generate a briefing first.');
+    });
+
+    // Integrations (Channels, MCP, Speech)
+    $('btn-refresh-integrations')?.addEventListener('click', loadIntegrations);
+    $('webhook-test-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = $('webhook-test-input').value.trim();
+      if (!text) return;
+      try {
+        const res = await api('/api/jarvis/channels/webhook/inbound', {
+          method: 'POST',
+          body: JSON.stringify({ sender: 'hud-simulator', content: text, channel_name: 'webhook' }),
+        });
+        $('webhook-test-input').value = '';
+        toast(`Webhook reply: ${(res.reply || '').slice(0, 70)}`);
+        loadChannels();
+        loadStatusQuiet();
+      } catch (err) {
+        toast(`Webhook error: ${err.message}`);
+      }
+    });
+    $('mcp-add-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const rawArgs = $('mcp-args').value.trim();
+        await api('/api/jarvis/mcp/servers', {
+          method: 'POST',
+          body: JSON.stringify({
+            server_id: $('mcp-id').value,
+            name: $('mcp-name').value,
+            transport: $('mcp-transport').value,
+            command: $('mcp-command').value,
+            args: rawArgs ? rawArgs.split(/\s+/) : [],
+            url: $('mcp-url').value,
+            token: $('mcp-token').value,
+          }),
+        });
+        toast('MCP server registered — click Connect to discover tools');
+        $('mcp-add-form').reset();
+        loadMCP();
+      } catch (err) {
+        toast(`MCP error: ${err.message}`);
+      }
+    });
+    $('btn-test-neural-tts')?.addEventListener('click', () => {
+      speakText('All systems nominal. J.A.R.V.I.S. neural voice pipeline online.');
     });
 
     // Memory
@@ -958,3 +1316,4 @@
 
   document.addEventListener('DOMContentLoaded', boot);
 })();
+

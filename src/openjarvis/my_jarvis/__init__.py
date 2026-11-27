@@ -9,11 +9,17 @@ from openjarvis.my_jarvis.brains import (
     BuiltinOfflineEngine,
     detect_brain_switch_intent,
 )
+from openjarvis.my_jarvis.briefing import MorningBriefingService
+from openjarvis.my_jarvis.channels_bridge import JarvisChannelManager
+from openjarvis.my_jarvis.mcp_hub import JarvisMCPHub
 from openjarvis.my_jarvis.runtime import MyJarvisRuntime
+from openjarvis.my_jarvis.speech_hub import JarvisSpeechHub
 from openjarvis.my_jarvis.tools import (
     HardwareAdvisorTool,
     HuggingFaceModelSearchTool,
     JarvisMemoryTool,
+    MCPHubStatusTool,
+    MorningBriefingTool,
     RepoSecurityAuditTool,
     SiteSecurityAuditTool,
     SwitchBrainTool,
@@ -34,6 +40,8 @@ def register_my_jarvis_primitives() -> None:
         ("repo_security_audit", RepoSecurityAuditTool),
         ("jarvis_memory", JarvisMemoryTool),
         ("switch_brain", SwitchBrainTool),
+        ("morning_briefing", MorningBriefingTool),
+        ("mcp_hub", MCPHubStatusTool),
     ):
         if not ToolRegistry.contains(key):
             ToolRegistry.register(key)(cls)
@@ -45,6 +53,10 @@ __all__ = [
     "BrainProfile",
     "BrainRouter",
     "BuiltinOfflineEngine",
+    "JarvisChannelManager",
+    "JarvisMCPHub",
+    "JarvisSpeechHub",
+    "MorningBriefingService",
     "MyJarvisRuntime",
     "VeniceEngine",
     "detect_brain_switch_intent",

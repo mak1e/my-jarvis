@@ -291,3 +291,132 @@ def test_fastapi_server_routes_and_openjarvis_compat(tmp_path: Path) -> None:
     # Native Stanford OpenJarvis OpenAI-compatible route still works!
     models_resp = client.get("/v1/models")
     assert models_resp.status_code == 200
+
+    # Morning Briefing endpoint (offline-safe mode)
+    brief = client.get("/api/jarvis/briefing?city=Tokyo&network=false")
+    assert brief.status_code == 200
+    assert brief.json()["briefing"]["city"] == "Tokyo"
+    assert "Jarvis briefing" in brief.json()["briefing"]["spoken_script"]
+
+    # Channels listing + live webhook inbound routing (hot-swaps brain & records activity!)
+    chs = client.get("/api/jarvis/channels")
+    assert chs.status_code == 200
+    assert any(c["id"] == "telegram" for c in chs.json()["channels"])
+
+    wh = client.post(
+        "/api/jarvis/channels/webhook/inbound",
+        json={"sender": "ios-shortcut", "content": "calculate 100 + 23"},
+    )
+    assert wh.status_code == 200
+    assert "123" in wh.json()["reply"]
+    assert len(client.get("/api/jarvis/channels").json()["activity"]) == 1
+
+    # Neural Speech status endpoint
+    sp = client.get("/api/jarvis/speech/status")
+    assert sp.status_code == 200
+    assert "tts_backends" in sp.json()
+    assert "stt_backends" in sp.json()
+
+    # MCP Server Hub CRUD endpoint
+    mcp_add = client.post(
+        "/api/jarvis/mcp/servers",
+        json={
+            "server_id": "demo-fetch",
+            "name": "Demo Fetch",
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-server-fetch"],
+        },
+    )
+    assert mcp_add.status_code == 200
+    mcp_list = client.get("/api/jarvis/mcp")
+    assert mcp_list.status_code == 200
+    assert any(s["id"] == "demo-fetch" for s in mcp_list.json()["servers"])
+    assert client.delete("/api/jarvis/mcp/servers/demo-fetch").status_code == 200
+
+
+def test_mcp_hub_discovers_and_injects_tools_into_runtime(tmp_path: Path) -> None:
+    from openjarvis.tools._stubs import ToolSpec
+
+    class _FakeMCPClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def initialize(self) -> None:
+            return None
+
+        def list_tools(self) -> List[ToolSpec]:
+            return [
+                ToolSpec(
+                    name="remote_ping",
+                    description="Ping a remote MCP server.",
+                    parameters={"type": "object", "properties": {}},
+                )
+            ]
+
+        def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "content": [{"type": "text", "text": f"pong:{name}"}],
+                "isError": False,
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    rt = MyJarvisRuntime(
+        router=BrainRouter(state_path=tmp_path / "brains.json"),
+        fact_store=LocalFactStore(path=tmp_path / "facts.jsonl"),
+        session_path=tmp_path / "history.json",
+        briefing_config_path=tmp_path / "briefing.json",
+        mcp_config_path=tmp_path / "mcp.json",
+    )
+    rt.mcp_hub.add_server(
+        server_id="fake-mcp",
+        name="Fake MCP",
+        transport="http",
+        url="http://localhost:9999/mcp",
+    )
+    fake_client = _FakeMCPClient()
+    res = rt.mcp_hub.connect("fake-mcp", client_factory=lambda _spec: fake_client)
+    assert res["ok"] is True
+    assert len(res["tools"]) == 1
+    assert res["tools"][0]["name"] == "remote_ping"
+
+    # Verify discovered MCP tool is automatically wired into MyJarvisRuntime's tool list
+    active_tool_names = [t.spec.name for t in rt._build_tools()]
+    assert "remote_ping" in active_tool_names
+    assert "morning_briefing" in active_tool_names
+
+    # Execute the MCPToolAdapter directly
+    remote_tool = next(t for t in rt._build_tools() if t.spec.name == "remote_ping")
+    out = remote_tool.execute()
+    assert out.success is True
+    assert out.content == "pong:remote_ping"
+
+    # Verify clean shutdown closes MCP transport
+    rt.shutdown()
+    assert fake_client.closed is True
+
+
+def test_briefing_and_channel_webhook_end_to_end(tmp_path: Path) -> None:
+    store = LocalFactStore(path=tmp_path / "facts.jsonl")
+    store.add_with_trust("Ship My-JARVIS v1 to GitHub", source="user", trust="trusted")
+    rt = MyJarvisRuntime(
+        router=BrainRouter(state_path=tmp_path / "brains.json"),
+        fact_store=store,
+        session_path=tmp_path / "history.json",
+        briefing_config_path=tmp_path / "briefing.json",
+        mcp_config_path=tmp_path / "mcp.json",
+    )
+    rep = rt.briefing_service.generate(city="Seattle", include_network=False)
+    assert rep.city == "Seattle"
+    assert "Ship My-JARVIS v1 to GitHub" in rep.markdown
+    assert "Active Personal Context" in rep.markdown
+
+    # Webhook can hot-swap JARVIS brain remotely
+    wh_res = rt.channel_manager.handle_webhook_inbound(
+        sender="telegram-relay",
+        content="/brain venice-deepseek",
+    )
+    assert wh_res["ok"] is True
+    assert rt.router.active_brain.id == "venice-deepseek"

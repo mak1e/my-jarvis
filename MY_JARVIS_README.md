@@ -2,35 +2,39 @@
 
 A custom, voice-enabled, multi-brain personal AI built directly on top of Stanford SAIL's [OpenJarvis](https://github.com/open-jarvis/OpenJarvis) (`src/openjarvis/my_jarvis/`).
 
-## What We Built on Top of OpenJarvis
+## What's Built on Top of Stanford OpenJarvis
 
-1. **Native Venice AI Engine (`VeniceEngine`)** — Registered into OpenJarvis's `EngineRegistry` (`venice`), targeting `https://api.venice.ai/api/v1` for private / uncensored open-weight cloud inference (DeepSeek, Venice Uncensored, Qwen, Llama) with `include_venice_system_prompt: false` support.
-2. **Hot-Swappable Multi-Brain Router (`BrainRouter`)** — Switch JARVIS's brain mid-conversation via voice (*"Jarvis, switch your brain to DeepSeek"*), chat command (`/brain claude-opus`), OpenJarvis tool call (`switch_brain`), or 1-click HUD card across:
-   - **Local Ollama** (`qwen3:8b`, `qwen3:32b`, `deepseek-r1:8b`, or any pulled Hugging Face GGUF)
-   - **Venice AI** (`deepseek-r1-671b`, `venice-uncensored`)
-   - **Frontier Cloud via OpenJarvis `CloudEngine`** (`claude-opus-4-6`, `claude-sonnet-4-6`, `deepseek-v4-flash`, `gpt-5-mini`, `gemini-2.5-flash`, `openrouter/auto`)
-   - **Built-in Offline Core** (`jarvis-offline-core`) so local tools, memory, hardware checks, and defensive audits work immediately with zero API keys or 500 crashes.
-3. **JARVIS Command Center HUD (`my-jarvis serve`)** — Dark aerospace telemetry web app mounted on top of OpenJarvis's FastAPI server (`create_app`), featuring:
-   - Canvas-rendered acoustic arc-reactor visualizer (cyan for local/frontier, amber-gold for Venice/uncensored)
-   - Browser Web Speech API **Push-to-Talk & Hands-Free Wake Word ("Hey Jarvis")** + Speech Synthesis TTS
-   - Live Provider & API Key Manager (stored locally in `~/.openjarvis/cloud-keys.env` with `chmod 600`)
-   - **Persistent Memory Vault** backed by OpenJarvis's `LocalFactStore` (retained across every brain switch)
-   - **Hardware & Hugging Face GGUF Model Advisor** (measures CPU/RAM/GPU VRAM and outputs exact `ollama pull` / `ollama run hf.co/...` commands)
-   - **Defensive Self-Auditor** (passive HTTP security header & TLS posture grader for sites you own + local codebase secret/hygiene scan)
-   - **Setup & Doctor Diagnostics** (`my-jarvis doctor`)
+1. **Native Venice AI Engine (`VeniceEngine`)** — Registered into OpenJarvis's `EngineRegistry` (`venice`), targeting `https://api.venice.ai/api/v1` for private / uncensored open-weight inference (DeepSeek, Venice Uncensored, Qwen, Llama) with `include_venice_system_prompt: false`.
+2. **Hot-Swappable Multi-Brain Router (`BrainRouter`)** — Switch JARVIS's brain mid-conversation via voice (*"Hey Jarvis, switch your brain to DeepSeek"*), `/brain <name>`, OpenJarvis tool calls, or 1-click HUD toggle across **Local Ollama**, **Venice AI**, **Claude Opus/Sonnet**, **DeepSeek Direct**, **GPT-5 Mini**, **Gemini 2.5 Flash**, **OpenRouter**, and an always-ready **Offline Core**.
+3. **Executive Morning Briefing (`MorningBriefingService`)** — Combines today's Google Calendar events, recent Google Drive files, local weather, top Hacker News headlines, and your OpenJarvis `LocalFactStore` priorities into both structured HUD cards and a spoken script (`my-jarvis briefing` or say *"give me my morning briefing"*).
+4. **Multi-Platform Messaging Channels (`JarvisChannelManager`)** — Bridges OpenJarvis's native **Telegram**, **Discord**, **Slack**, and **Webhook** (`POST /api/jarvis/channels/webhook/inbound` for Apple Shortcuts / n8n / Zapier / WhatsApp relays) directly into `MyJarvisRuntime` so you can talk to JARVIS and switch brains remotely.
+5. **MCP Server Hub (`JarvisMCPHub`)** — Connects Stdio and Streamable HTTP Model Context Protocol servers via OpenJarvis's `MCPClient` + `MCPToolProvider` and automatically exposes every discovered tool inside `OrchestratorAgent` (with starter templates for Filesystem, Web Fetch, GitHub MCP, and Playwright).
+6. **Neural Voice Pipeline (`JarvisSpeechHub`)** — Upgrades smoothly from zero-dependency Browser Web Speech API (Push-to-Talk & Hands-Free *"Hey Jarvis"* wake mode) to OpenJarvis's neural TTS/STT backends (**Kokoro local TTS**, **Faster-Whisper local STT**, **OpenAI TTS/Whisper**, **ElevenLabs**, **Cartesia**, **Deepgram**).
+7. **Hardware / VRAM Advisor & Hugging Face GGUF Explorer** — Measures CPU/RAM/GPU VRAM, scores fitting local open-weight models, searches Hugging Face Hub for GGUF models, and outputs copyable `ollama pull` / `ollama run hf.co/...` commands.
+8. **Defensive Self-Auditor** — Authorized passive HTTP security header & TLS posture grader (`A+`–`F` with SSRF guard) and local codebase secret/hygiene scanner.
 
-## Quick Start on Your Machine
+## Clone & Run on Your Machine
 
 ```bash
-# 1. Sync Python dependencies (Python 3.11-3.13 + uv)
+git clone -b custom/my-jarvis https://github.com/mak1e/my-jarvis.git
+cd my-jarvis
 ./scripts/setup_my_jarvis.sh
 
-# 2. (Optional, free & local) Install Ollama and pull a local model
+# Optional: free local LLM via Ollama
 ollama serve &
 ollama pull qwen3:8b
 
-# 3. Launch the JARVIS Command Center HUD + OpenAI-compatible OpenJarvis API
+# Launch the JARVIS Command Center HUD + OpenJarvis /v1/* API
 uv run my-jarvis serve --port 8765
+```
+
+### Optional OpenJarvis Extras
+
+```bash
+uv sync --extra voice             # Local Kokoro neural TTS
+uv sync --extra speech            # Local Faster-Whisper STT
+uv sync --extra channel-discord   # Discord bot gateway
+uv sync --extra channel-slack     # Slack Socket Mode bot
 ```
 
 ### CLI Commands
@@ -38,7 +42,11 @@ uv run my-jarvis serve --port 8765
 ```bash
 uv run my-jarvis serve --port 8765   # Launch web HUD + OpenJarvis /v1/* API
 uv run my-jarvis chat                # Interactive terminal REPL with /brain hot-swap
+uv run my-jarvis briefing            # Generate executive Morning Briefing
 uv run my-jarvis brains              # List all brains & live provider readiness
+uv run my-jarvis channels            # Inspect Telegram/Discord/Slack/Webhook status
+uv run my-jarvis mcp                 # Inspect registered MCP servers & discovered tools
+uv run my-jarvis voice               # Inspect Kokoro/OpenAI/ElevenLabs/Faster-Whisper status
 uv run my-jarvis hardware            # Inspect RAM/VRAM & best-fit local GGUF models
 uv run my-jarvis doctor              # Run health checks & setup fix tips
 ```

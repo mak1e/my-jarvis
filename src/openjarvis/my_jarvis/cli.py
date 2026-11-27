@@ -146,6 +146,95 @@ def doctor() -> None:
     _print_doctor(rt)
 
 
+@main.command()
+@click.option("--city", default=None, help="Override city for local weather.")
+def briefing(city: str | None) -> None:
+    """Generate your executive Morning Briefing (Calendar, Drive, Weather, News, Memory)."""
+    rt = MyJarvisRuntime()
+    rep = rt.briefing_service.generate(city=city)
+    console.print(
+        Panel(
+            Markdown(rep.markdown),
+            title="[bold cyan]J.A.R.V.I.S. Executive Briefing[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+
+
+@main.command()
+def channels() -> None:
+    """List Telegram, Discord, Slack, and Webhook messaging channel status."""
+    rt = MyJarvisRuntime()
+    table = Table(title="My-JARVIS Messaging Channels (OpenJarvis)")
+    table.add_column("Channel", style="cyan")
+    table.add_column("Label", style="bold")
+    table.add_column("Status")
+    table.add_column("Setup / Hint", style="dim")
+    for ch in rt.channel_manager.list_channels():
+        color = "green" if ch["status"] == "connected" else "yellow"
+        table.add_row(
+            ch["id"],
+            ch["label"],
+            f"[{color}]{ch['status']}[/{color}]",
+            ch["install_hint"],
+        )
+    console.print(table)
+
+
+@main.command()
+def mcp() -> None:
+    """List configured MCP servers and connected external tools."""
+    rt = MyJarvisRuntime()
+    data = rt.mcp_hub.list_servers()
+    table = Table(title="My-JARVIS MCP Server Hub")
+    table.add_column("ID", style="cyan")
+    table.add_column("Name", style="bold")
+    table.add_column("Transport")
+    table.add_column("Connected")
+    table.add_column("Tools")
+    for s in data["servers"]:
+        table.add_row(
+            s["id"],
+            s["name"],
+            s["transport"],
+            "[green]YES[/green]" if s["connected"] else "[yellow]NO[/yellow]",
+            str(s["tool_count"]),
+        )
+    if not data["servers"]:
+        console.print(
+            "[dim]No MCP servers configured yet. Add one in the HUD Integrations tab.[/dim]"
+        )
+    else:
+        console.print(table)
+
+
+@main.command()
+def voice() -> None:
+    """Inspect OpenJarvis neural TTS (Kokoro/OpenAI/ElevenLabs) & STT (Faster-Whisper) readiness."""
+    rt = MyJarvisRuntime()
+    st = rt.speech_hub.status()
+    table = Table(title="My-JARVIS Neural Speech Engines")
+    table.add_column("Kind")
+    table.add_column("Backend", style="cyan")
+    table.add_column("Ready")
+    table.add_column("Setup Hint", style="dim")
+    for item in st["tts_backends"]:
+        table.add_row(
+            "TTS",
+            item["label"],
+            "[green]READY[/green]" if item["ready"] else "[yellow]SETUP[/yellow]",
+            item["install_hint"],
+        )
+    for item in st["stt_backends"]:
+        table.add_row(
+            "STT",
+            item["label"],
+            "[green]READY[/green]" if item["ready"] else "[yellow]SETUP[/yellow]",
+            item["install_hint"],
+        )
+    console.print(table)
+
+
 def _print_doctor(rt: MyJarvisRuntime) -> None:
     report = rt.run_doctor()
     table = Table(title="My-JARVIS & OpenJarvis Doctor")

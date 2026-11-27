@@ -314,10 +314,92 @@ class SwitchBrainTool(BaseTool):
         )
 
 
+@ToolRegistry.register("morning_briefing")
+class MorningBriefingTool(BaseTool):
+    """Generate an executive morning briefing from Calendar, Drive, Weather, News, and Memory."""
+
+    tool_id = "morning_briefing"
+
+    def __init__(self, briefing_service: Any = None) -> None:
+        self._briefing = briefing_service
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="morning_briefing",
+            description=(
+                "Generate an executive daily briefing combining Google Calendar today's events, "
+                "recent Google Drive files, local weather, top Hacker News headlines, and "
+                "JARVIS persistent memory priorities."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "Optional city for local weather (e.g. 'San Francisco').",
+                    }
+                },
+                "required": [],
+            },
+            category="productivity",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.my_jarvis.briefing import MorningBriefingService
+
+        svc = self._briefing or MorningBriefingService()
+        city = str(params.get("city") or "").strip() or None
+        report = svc.generate(city=city)
+        return ToolResult(
+            tool_name=self.tool_id,
+            content=report.markdown,
+            success=True,
+        )
+
+
+@ToolRegistry.register("mcp_hub")
+class MCPHubStatusTool(BaseTool):
+    """List connected MCP servers and discovered external tools."""
+
+    tool_id = "mcp_hub"
+
+    def __init__(self, mcp_hub: Any = None) -> None:
+        self._hub = mcp_hub
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="mcp_hub",
+            description=(
+                "Inspect configured MCP (Model Context Protocol) servers and currently "
+                "connected external tools available to JARVIS."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+            category="integrations",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        del params
+        if self._hub is None:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content=json.dumps({"servers": [], "total_mcp_tools": 0}),
+                success=True,
+            )
+        return ToolResult(
+            tool_name=self.tool_id,
+            content=json.dumps(self._hub.list_servers(), indent=2),
+            success=True,
+        )
+
+
 __all__ = [
     "HardwareAdvisorTool",
     "HuggingFaceModelSearchTool",
     "JarvisMemoryTool",
+    "MCPHubStatusTool",
+    "MorningBriefingTool",
     "RepoSecurityAuditTool",
     "SiteSecurityAuditTool",
     "SwitchBrainTool",
